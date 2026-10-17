@@ -1,0 +1,79 @@
+name: update AUR packages
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-packages
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-26.04
+    container: archlinux:base-devel
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: install tools
+        run: pacman -Syu --noconfirm --needed git github-cli openssh
+
+      - name: check out templates
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: generate AUR recipes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- bash scripts/prepare-aur.sh build/aur
+
+      - name: publish to AUR
+        env:
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+        run: |
+          umask 077
+          test -n "$AUR_KEY"
+          printf '%s\n' "$AUR_KEY" > "$RUNNER_TEMP/aur_key"
+          trap 'shred -u "$RUNNER_TEMP/aur_key"' EXIT
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/aur_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/.github/aur_known_hosts"
+          for source in build/aur/*; do
+            package=${source##*/}
+            directory="$RUNNER_TEMP/$package"
+            git -c init.defaultBranch=master clone --depth=1 --single-branch --no-tags \
+              "ssh://aur@aur.archlinux.org/$package.git" "$directory"
+            version=$(awk '$1 == "pkgver" { v=$3 } $1 == "pkgrel" { r=$3 } END { print v "-" r }' "$source/.SRCINFO")
+            current=
+            if [[ -f $directory/.SRCINFO ]]; then
+              current=$(awk '$1 == "pkgver" { v=$3 } $1 == "pkgrel" { r=$3 } END { print v "-" r }' "$directory/.SRCINFO")
+              if (( $(vercmp "$version" "$current") < 0 )); then
+                echo "refusing to downgrade $package from $current to $version" >&2
+                exit 1
+              fi
+            fi
+            cp "$source/PKGBUILD" "$source/.SRCINFO" "$directory/"
+            git -C "$directory" add PKGBUILD .SRCINFO
+            if git -C "$directory" diff --cached --quiet; then
+              echo "$package is current"
+              continue
+            fi
+            if [[ -n $current ]] && (( $(vercmp "$version" "$current") == 0 )); then
+              echo "$package changed without a version bump; increase pkgrel in its template" >&2
+              exit 1
+            fi
+            git -C "$directory" diff --cached --check
+            git -C "$directory" config user.name hyperpuncher
+            git -C "$directory" config user.email hyperpuncher@users.noreply.github.com
+            git -C "$directory" commit -m "chore: update $package to $version"
+            git -C "$directory" push origin HEAD:master
+          done
