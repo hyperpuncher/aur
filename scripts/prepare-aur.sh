@@ -6,25 +6,40 @@ out=${1:?output directory required}
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 mkdir "$work/downloads" "$work/packages"
-declare -A tags checksums
+declare -A releases checksums
 
 for template in */PKGBUILD.in; do
-	url=$(bash -c 'source "$1"; printf "%s" "$url"' bash "$template")
+	metadata=$(bash -c 'source "$1"; printf "%s\t%s" "$url" "${_release:-latest}"' bash "$template")
+	IFS=$'\t' read -r url release <<< "$metadata"
 	if [[ ! $url =~ ^https://github.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?$ ]]; then
 		printf 'template url must identify a GitHub repository: %s\n' "$template" >&2
 		exit 1
 	fi
 	repo=${BASH_REMATCH[1]}
-	if [[ ! -v tags[$repo] ]]; then
-		tags[$repo]=$(gh api "repos/${repo}/releases/latest" --jq .tag_name)
+	key="$repo/$release"
+	if [[ ! -v releases[$key] ]]; then
+		endpoint=latest
+		if [[ $release != latest ]]; then
+			endpoint="tags/$release"
+		fi
+		releases[$key]=$(gh api "repos/${repo}/releases/$endpoint" \
+			--jq '[.tag_name, (.assets[]? | select(.name == "SHA256SUMS") | .updated_at)] | @tsv')
 	fi
-	tag=${tags[$repo]}
-	if [[ ! $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-		printf 'unsupported release tag for %s: %s\n' "$repo" "$tag" >&2
-		exit 1
+	IFS=$'\t' read -r tag built <<< "${releases[$key]}"
+	if [[ $release == latest ]]; then
+		if [[ ! $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+			printf 'unsupported release tag for %s: %s\n' "$repo" "$tag" >&2
+			exit 1
+		fi
+		version=${BASH_REMATCH[1]}
+	else
+		if [[ -z $built ]]; then
+			printf 'missing snapshot build time for %s %s\n' "$repo" "$tag" >&2
+			exit 1
+		fi
+		version=$(date --utc --date "$built" +%Y%m%d.%H%M%S)
 	fi
-	version=${BASH_REMATCH[1]}
-	downloads="$work/downloads/$repo"
+	downloads="$work/downloads/$key"
 	mkdir -p "$downloads"
 	if [[ ! -f $downloads/SHA256SUMS ]]; then
 		gh release download "$tag" --repo "$repo" --pattern SHA256SUMS --dir "$downloads"

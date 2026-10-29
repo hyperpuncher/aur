@@ -11,8 +11,12 @@ unchanged recipes are not pushed. publication uses the `AUR_KEY` secret.
 - templates: `<package-name>/PKGBUILD.in`
 - upstream: the template's GitHub `url`
 - placeholders: `@VERSION@`, `@SHA256_X86_64@`, `@SHA256_AARCH64@`
-- supported releases: `vX.Y.Z` tags with a `SHA256SUMS` asset
+- stable releases: `vX.Y.Z` tags with a `SHA256SUMS` asset
+- snapshots: set `_release=nightly`; versions use the checksum asset's UTC timestamp
 - packaging-only changes: increase `pkgrel`
+
+snapshot templates use versioned download-cache names. upstream can replace
+nightly files, so older recipes can fail checksum verification.
 
 local generation, without publication:
 
