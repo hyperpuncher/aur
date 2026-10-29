@@ -99,7 +99,8 @@ prepare
 bash -c 'source "$1"; [[ $pkgver == 1.2.3 ]]' bash "$work/output/example-bin/PKGBUILD"
 SRCDEST="$work/release/example/other" makepkg --dir "$work/output/example-bin" --verifysource
 for package in "$work/output"/nemo-speech-*-bin; do
-	bash -c 'source "$1"; [[ $pkgver == 0.2.1 && $pkgrel == 1 ]]' bash "$package/PKGBUILD"
+	expected_rel=$(bash -c 'source "$1"; printf "%s" "$pkgrel"' bash "$work/repo/${package##*/}/PKGBUILD.in")
+	bash -c 'source "$1"; [[ $pkgver == 0.2.1 && $pkgrel == "$2" ]]' bash "$package/PKGBUILD" "$expected_rel"
 	diff -u "$package/.SRCINFO" <(makepkg --dir "$package" --printsrcinfo)
 	while read -r architecture; do
 		printf 'source /etc/makepkg.conf\nCARCH=%s\n' "$architecture" > "$work/makepkg.conf"
