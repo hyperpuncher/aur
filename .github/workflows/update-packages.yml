@@ -8,9 +8,7 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: update-packages
-  cancel-in-progress: false
+concurrency: update-packages
 
 jobs:
   update:
@@ -23,7 +21,7 @@ jobs:
         shell: bash
     steps:
       - name: install tools
-        run: pacman -Syu --noconfirm --needed git github-cli openssh
+        run: pacman -Syu --noconfirm --needed git github-cli openssh devtools nvchecker python-jq
 
       - name: check out templates
         uses: actions/checkout@v7
@@ -36,7 +34,17 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          runuser -u builder -- bash scripts/prepare-aur.sh build/aur
+          runuser -u builder -- bash <<'SCRIPT'
+          umask 077
+          mkdir -p "$HOME/.config/nvchecker"
+          {
+            printf '[keys]\ngithub = "%s"\n' "$GH_TOKEN"
+            for config in */.nvchecker.toml; do
+              printf '"httptoken_%s" = "Bearer %s"\n' "${config%/.nvchecker.toml}" "$GH_TOKEN"
+            done
+          } > "$HOME/.config/nvchecker/keyfile.toml"
+          bash scripts/prepare-aur.sh build/aur
+          SCRIPT
 
       - name: publish to AUR
         env:
@@ -61,15 +69,20 @@ jobs:
                 exit 1
               fi
             fi
-            cp "$source/PKGBUILD" "$source/.SRCINFO" "$directory/"
-            git -C "$directory" add PKGBUILD .SRCINFO
+            cp "$source/PKGBUILD" "$source/.SRCINFO" "$source/.nvchecker.toml" "$directory/"
+            git -C "$directory" add PKGBUILD .SRCINFO .nvchecker.toml
             if git -C "$directory" diff --cached --quiet; then
               echo "$package is current"
               continue
             fi
-            if [[ -n $current ]] && (( $(vercmp "$version" "$current") == 0 )); then
-              echo "$package changed without a version bump; increase pkgrel in its template" >&2
-              exit 1
+            if [[ $version == "$current" ]] && ! git -C "$directory" diff --cached --quiet -- PKGBUILD; then
+              revision=${current##*-}
+              revision=$((revision + 1))
+              sed -i "s/^pkgrel=.*/pkgrel=$revision/" "$source/PKGBUILD"
+              runuser -u builder -- makepkg --dir "$source" --printsrcinfo > "$source/.SRCINFO"
+              cp "$source/PKGBUILD" "$source/.SRCINFO" "$directory/"
+              git -C "$directory" add PKGBUILD .SRCINFO
+              version="${version%-*}-$revision"
             fi
             git -C "$directory" diff --cached --check
             git -C "$directory" config user.name hyperpuncher

@@ -1,47 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run from the repository root as a non-root user. Requires gh and makepkg.
+# Run from the repository root as a non-root user.
 out=${1:?output directory required}
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 mkdir "$work/downloads" "$work/packages"
-declare -A releases checksums
+
+# AUR is the source of the current version and packaging revision.
+query=()
+for template in */PKGBUILD.in; do
+	query+=(--data-urlencode "arg[]=${template%/PKGBUILD.in}")
+done
+published=$(curl --fail --silent --show-error --get \
+	https://aur.archlinux.org/rpc/v5/info "${query[@]}")
+declare -A checksums
 
 for template in */PKGBUILD.in; do
-	metadata=$(bash -c 'source "$1"; printf "%s\t%s" "$url" "${_release:-latest}"' bash "$template")
-	IFS=$'\t' read -r url release <<< "$metadata"
+	package=${template%/PKGBUILD.in}
+	directory="$work/packages/$package"
+	mkdir "$directory"
+	current=$(jq -r --arg name "$package" \
+		'[.results[] | select(.Name == $name)][0].Version // "0-1"' <<< "$published")
+	version=${current%-*}
+	revision=${current##*-}
+	pkgbuild="$directory/PKGBUILD"
+	sed -e "s/@VERSION@/${version#*:}/g" -e "s/^pkgrel=.*/pkgrel=$revision/" \
+		"$template" > "$pkgbuild"
+	cp "$package/.nvchecker.toml" "$directory/"
+	pkgctl version upgrade --no-update-checksums "$directory"
+
+	metadata=$(bash -c 'source "$1"; printf "%s\t%s" "$url" "${_release:-v$pkgver}"' bash "$pkgbuild")
+	IFS=$'\t' read -r url tag <<< "$metadata"
 	if [[ ! $url =~ ^https://github.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?$ ]]; then
 		printf 'template url must identify a GitHub repository: %s\n' "$template" >&2
 		exit 1
 	fi
 	repo=${BASH_REMATCH[1]}
-	key="$repo/$release"
-	if [[ ! -v releases[$key] ]]; then
-		endpoint=latest
-		if [[ $release != latest ]]; then
-			endpoint="tags/$release"
-		fi
-		releases[$key]=$(gh api "repos/${repo}/releases/$endpoint" \
-			--jq '[.tag_name, (.assets[]? | select(.name == "SHA256SUMS") | .updated_at)] | @tsv')
-	fi
-	IFS=$'\t' read -r tag built <<< "${releases[$key]}"
-	if [[ $release == latest ]]; then
-		if [[ ! $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-			printf 'unsupported release tag for %s: %s\n' "$repo" "$tag" >&2
-			exit 1
-		fi
-		version=${BASH_REMATCH[1]}
-	else
-		if [[ -z $built ]]; then
-			printf 'missing snapshot build time for %s %s\n' "$repo" "$tag" >&2
-			exit 1
-		fi
-		version=$(date --utc --date "$built" +%Y%m%d.%H%M%S)
-	fi
-	downloads="$work/downloads/$key"
-	mkdir -p "$downloads"
+	downloads="$work/downloads/$repo/$tag"
 	if [[ ! -f $downloads/SHA256SUMS ]]; then
+		mkdir -p "$downloads"
 		gh release download "$tag" --repo "$repo" --pattern SHA256SUMS --dir "$downloads"
 	fi
 	checksums=()
@@ -49,11 +47,6 @@ for template in */PKGBUILD.in; do
 		checksums["$filename"]=$checksum
 	done < "$downloads/SHA256SUMS"
 
-	package=${template%/PKGBUILD.in}
-	directory="$work/packages/$package"
-	mkdir "$directory"
-	pkgbuild="$directory/PKGBUILD"
-	sed "s/@VERSION@/$version/g" "$template" > "$pkgbuild"
 	while read -r architecture url; do
 		filename=${url##*/}
 		checksum=${checksums[$filename]:-}
@@ -77,12 +70,11 @@ for template in */PKGBUILD.in; do
 		printf 'unfilled template: %s\n' "$template" >&2
 		exit 1
 	fi
-	bash -n "$pkgbuild"
 	makepkg --dir "$directory" --printsrcinfo > "$directory/.SRCINFO"
 	printf 'prepared %s from %s %s\n' "$package" "$repo" "$tag"
 done
 
-# Publish no output until every required download has passed verification.
+# Do not expose partial output if a check fails.
 mkdir -p "$out"
 cp -a "$work/packages/." "$out/"
 printf 'generated AUR recipes in %s\n' "$out"

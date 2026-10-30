@@ -1,7 +1,7 @@
 # Maintainer: hyperpuncher
 pkgname=nemo-speech-vulkan-bin
 pkgver=@VERSION@
-pkgrel=2
+pkgrel=1
 pkgdesc='Native speech recognition, synthesis, and translation with Vulkan support'
 arch=('x86_64' 'aarch64')
 url='https://github.com/NVIDIA/NeMo-Speech.cpp'

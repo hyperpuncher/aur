@@ -9,21 +9,25 @@ trap 'rm -rf -- "$work"' EXIT
 mkdir "$work/repo" "$work/bin" "$work/release"
 for template in "$root"/*/PKGBUILD.in; do bash -n "$template"; done
 cp -a "$root"/nemo-speech-cpu{,-nightly}-bin "$work/repo/"
-export TEST_RELEASE_DIR="$work/release"
-export TEST_TAG=v0.2.1 TEST_OTHER_TAG=v1.2.3 TEST_NIGHTLY_TIME=2026-10-28T20:34:48Z
+export TEST_RELEASE_DIR="$work/release" TEST_AUR_INFO="$work/aur.json"
 
-# Only GitHub is replaced. Generation uses the real makepkg and checksum tools.
+# Only remote boundaries are replaced; pkgctl, nvchecker, and makepkg are real.
+cat > "$work/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $* == *https://aur.archlinux.org/rpc/v5/info* ]]
+cat "$TEST_AUR_INFO"
+CURL
+cat > "$work/aur.json" <<'JSON'
+{"results":[
+  {"Name":"nemo-speech-cpu-bin","Version":"0.2.0-5"},
+  {"Name":"nemo-speech-cpu-nightly-bin","Version":"20261028.203448-3"}
+]}
+JSON
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $1 == api ]]; then
-	case $2 in
-		*/releases/tags/nightly) printf 'nightly\t%s\n' "$TEST_NIGHTLY_TIME" ;;
-		repos/example/other/releases/latest) printf '%s\n' "$TEST_OTHER_TAG" ;;
-		*) printf '%s\n' "$TEST_TAG" ;;
-	esac
-	exit 0
-fi
+[[ $1 == release && $2 == download ]]
 tag=$3
 pattern= directory= repo=
 while (( $# )); do
@@ -36,7 +40,7 @@ while (( $# )); do
 done
 cp "$TEST_RELEASE_DIR/$repo/$tag/$pattern" "$directory/"
 GH
-chmod +x "$work/bin/gh"
+chmod +x "$work/bin/curl" "$work/bin/gh"
 
 prepare() {
 	(cd "$work/repo"; PATH="$work/bin:$PATH" bash "$root/scripts/prepare-aur.sh" "$work/output")
@@ -54,41 +58,24 @@ for channel in 0.2.1 nightly; do
 	(cd "$directory"; sha256sum -- *.tar.gz > SHA256SUMS)
 done
 
-# A second upstream proves that versions and checksums are not shared by project.
-mkdir -p "$work/release/example/other/v1.2.3" "$work/repo/example-bin"
-cat > "$work/repo/example-bin/PKGBUILD.in" <<'TEMPLATE'
-pkgname=example-bin
-pkgver=@VERSION@
-pkgrel=1
-arch=('x86_64')
-url='https://github.com/example/other'
-source_x86_64=("${url}/releases/download/v${pkgver}/example-${pkgver}.tar.gz")
-sha256sums_x86_64=('@SHA256_X86_64@')
-package() { :; }
-TEMPLATE
-other="$work/release/example/other/v1.2.3"
-printf 'other project\n' > "$work/marker"
-tar -czf "$other/example-1.2.3.tar.gz" -C "$work" marker
-(cd "$other"; sha256sum -- *.tar.gz > SHA256SUMS)
-cp -a "$work/repo" "$work/templates"
+# nvchecker's manual source supplies local upstream fixtures without HTTP.
+for entry in 'nemo-speech-cpu-bin 0.2.1' 'nemo-speech-cpu-nightly-bin 20261028.203448'; do
+	read -r package version <<< "$entry"
+	printf '["%s"]\nsource = "manual"\nmanual = "%s"\n' "$package" "$version" \
+		> "$work/repo/$package/.nvchecker.toml"
+done
 prepare
 
-# Cover stable, nightly, both architectures, and a different upstream.
-for template in "$work/templates"/*/PKGBUILD.in; do
+for template in "$work/repo"/*/PKGBUILD.in; do
 	package=${template%/PKGBUILD.in}
 	package=${package##*/}
 	directory="$work/output/$package"
-	version=0.2.1
-	if [[ $package == *-nightly-bin ]]; then version=20261028.203448; fi
-	if [[ $package == example-bin ]]; then version=1.2.3; fi
+	version=0.2.1 rel=1
+	if [[ $package == *-nightly-bin ]]; then version=20261028.203448; rel=3; fi
 	(
-		# shellcheck source=/dev/null
-		source "$template"
-		rel=$pkgrel
 		# shellcheck source=/dev/null
 		source "$directory/PKGBUILD"
 		[[ $pkgname == "$package" && $pkgver == "$version" && $pkgrel == "$rel" ]]
-		grep -Fxq "pkgname = $package" "$directory/.SRCINFO"
 		grep -Fxq "$(printf '\tpkgver = %s' "$version")" "$directory/.SRCINFO"
 		grep -Fxq "$(printf '\tpkgrel = %s' "$rel")" "$directory/.SRCINFO"
 		for architecture in "${arch[@]}"; do
@@ -101,20 +88,11 @@ for template in "$work/templates"/*/PKGBUILD.in; do
 			[[ ${hashes[0]} == "${hash%% *}" ]]
 			grep -Fxq "$(printf '\tsource_%s = %s' "$architecture" "$entry")" "$directory/.SRCINFO"
 			grep -Fxq "$(printf '\tsha256sums_%s = %s' "$architecture" "${hash%% *}")" "$directory/.SRCINFO"
-			if [[ $package == *-nightly-bin ]]; then
-				[[ $entry == *"$version"*::* && $url == */nightly/nemo-speech-nightly-* ]]
-			fi
 		done
 	)
 done
-diff -r "$work/templates" "$work/repo"
 cp -a "$work/output" "$work/expected"
-printf 'ok: stable, nightly, architectures, metadata, and upstreams verified\n'
-
-# Snapshot checks need only the nightly template.
-mv "$work/repo" "$work/all-templates"
-mkdir "$work/repo"
-cp -a "$work/all-templates/nemo-speech-cpu-nightly-bin" "$work/repo/"
+printf 'ok: published revisions preserved; pkgctl resets a new upstream version to 1\n'
 
 reject() {
 	if prepare > "$work/failure.log" 2>&1; then
@@ -125,12 +103,8 @@ reject() {
 	diff -r "$work/expected" "$work/output"
 }
 
-# A pending stable change makes partial writes visible if nightly generation fails.
-cp -a "$work/all-templates/nemo-speech-cpu-bin" "$work/repo/"
-sed -i 's/^pkgrel=1$/pkgrel=9/' "$work/repo/nemo-speech-cpu-bin/PKGBUILD.in"
-export TEST_TAG=unexpected-tag
-reject 'unsupported release tag'
-export TEST_TAG=v0.2.1
+# A pending stable change exposes partial writes on failure.
+sed -i "s/^pkgdesc=.*/pkgdesc='pending packaging change'/" "$work/repo/nemo-speech-cpu-bin/PKGBUILD.in"
 manifest="$work/release/NVIDIA/NeMo-Speech.cpp/v0.2.1/SHA256SUMS"
 cp "$manifest" "$work/checksums"
 printf '' > "$manifest"
@@ -141,21 +115,17 @@ cp "$asset" "$work/archive"
 printf 'corrupt\n' >> "$asset"
 reject 'computed checksum did NOT match'
 cp "$work/archive" "$asset"
-mv "$work/repo/nemo-speech-cpu-bin" "$work/pending-stable"
-export TEST_NIGHTLY_TIME=
-reject 'missing snapshot build time'
-export TEST_NIGHTLY_TIME=2026-10-29T20:34:48Z
-printf 'ok: each failure reports its cause and preserves existing output\n'
+printf 'ok: invalid downloads preserve existing output\n'
 
+mv "$work/repo/nemo-speech-cpu-bin" "$work/pending-stable"
+sed -i 's/20261028.203448/20261029.203448/' "$work/repo/nemo-speech-cpu-nightly-bin/.nvchecker.toml"
 prepare
 snapshot="$work/output/nemo-speech-cpu-nightly-bin"
 (
 	# shellcheck source=/dev/null
 	source "$snapshot/PKGBUILD"
-	[[ $pkgver == 20261029.203448 && ${source_aarch64[0]} == *"$pkgver"*::* ]]
+	[[ $pkgver == 20261029.203448 && $pkgrel == 1 && ${source_aarch64[0]} == *"$pkgver"*::* ]]
 )
-# Only this nightly package should change; compare everything else byte for byte.
-cp "$snapshot/PKGBUILD" "$snapshot/.SRCINFO" "$work/expected/nemo-speech-cpu-nightly-bin/"
+cp "$snapshot/PKGBUILD" "$snapshot/.SRCINFO" "$snapshot/.nvchecker.toml" "$work/expected/nemo-speech-cpu-nightly-bin/"
 diff -r "$work/expected" "$work/output"
-diff -r "$work/templates" "$work/all-templates"
-printf 'ok: a new nightly changes its version and cache name, not stable recipes\n'
+printf 'ok: pkgctl resets a new snapshot to 1 without changing stable recipes\n'

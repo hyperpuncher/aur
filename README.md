@@ -1,28 +1,29 @@
 # aur
 
-my AUR package templates and update automation.
-generated `PKGBUILD` and `.SRCINFO` files live in AUR.
+my AUR package templates and daily update automation.
+generated recipes and version history live in AUR.
 
-the workflow checks releases daily at 06:23 UTC and publishes version bumps.
-unchanged recipes are not pushed. publication uses the `AUR_KEY` secret.
+`pkgctl` and `nvchecker` check upstream versions and reset `pkgrel` on upgrades.
+AUR supplies the current revision. packaging-only changes increment it automatically.
+unchanged recipes are not pushed.
 
 ## maintenance
 
-- templates: `<package-name>/PKGBUILD.in`
-- upstream: the template's GitHub `url`
+- `<package-name>/PKGBUILD.in`: package instructions
+- `<package-name>/.nvchecker.toml`: upstream version checks
 - placeholders: `@VERSION@`, `@SHA256_X86_64@`, `@SHA256_AARCH64@`
-- stable releases: `vX.Y.Z` tags with a `SHA256SUMS` asset
-- snapshots: set `_release=nightly`; versions use the checksum asset's UTC timestamp
-- packaging-only changes: increase `pkgrel`
+- templates keep `pkgrel=1`; published revisions are managed automatically
+- publication: daily at 06:23 UTC, using the `AUR_KEY` secret
 
-snapshot templates use versioned download-cache names. upstream can replace
-nightly files, so older recipes can fail checksum verification.
-
-local generation, without publication:
+local generation, without publication, needs `devtools`, `nvchecker`, `python-jq`,
+and `github-cli`:
 
 ```sh
 bash scripts/prepare-aur.sh build/aur
 ```
+
+nightly downloads use versioned cache names. older recipes can fail verification
+when upstream replaces the files.
 
 checks:
 
