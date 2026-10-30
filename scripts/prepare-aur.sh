@@ -28,7 +28,8 @@ for template in */PKGBUILD.in; do
 	sed -e "s/@VERSION@/${version#*:}/g" -e "s/^pkgrel=.*/pkgrel=$revision/" \
 		"$template" > "$pkgbuild"
 	cp "$package/.nvchecker.toml" "$directory/"
-	pkgctl version upgrade --no-update-checksums "$directory"
+	# pkgctl's spinner fails with TERM=dumb, including in headless CI.
+	TERM=xterm pkgctl version upgrade --no-update-checksums "$directory"
 
 	metadata=$(bash -c 'source "$1"; printf "%s\t%s" "$url" "${_release:-v$pkgver}"' bash "$pkgbuild")
 	IFS=$'\t' read -r url tag <<< "$metadata"

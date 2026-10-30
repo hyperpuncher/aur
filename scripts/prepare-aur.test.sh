@@ -10,6 +10,7 @@ mkdir "$work/repo" "$work/bin" "$work/release"
 for template in "$root"/*/PKGBUILD.in; do bash -n "$template"; done
 cp -a "$root"/nemo-speech-cpu{,-nightly}-bin "$work/repo/"
 export TEST_RELEASE_DIR="$work/release" TEST_AUR_INFO="$work/aur.json"
+export TERM=dumb
 
 # Only remote boundaries are replaced; pkgctl, nvchecker, and makepkg are real.
 cat > "$work/bin/curl" <<'CURL'
